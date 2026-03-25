@@ -229,13 +229,19 @@ def telegram_gonder(mesaj):
 
 def telegram_duzenle(msg_id, mesaj):
     try:
-        requests.post(
+        r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
             json={"chat_id": CHAT_ID, "message_id": msg_id, "text": mesaj, "parse_mode": "HTML"},
             timeout=10
         )
+        veri = r.json()
+        if not veri.get("ok"):
+            print(f"Telegram düzenle hata: {veri.get('description')}")
+            return False
+        return True
     except Exception as e:
         print(f"Telegram düzenle hata: {e}")
+        return False
 
 
 def bot_calistir():
@@ -273,9 +279,13 @@ def bot_calistir():
                     mesaj_id = telegram_gonder(mesaj)
                     print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] İlk mesaj gönderildi!")
                 else:
-                    telegram_duzenle(mesaj_id, mesaj)
-                    top = max(degisimler.get("20dk", [("?",0,0)]), key=lambda x: x[1])
-                    print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Güncellendi - Top: {top[0]} %{top[1]:.2f}")
+                    basari = telegram_duzenle(mesaj_id, mesaj)
+                    if not basari:
+                        mesaj_id = telegram_gonder(mesaj)
+                        print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Yeni mesaj gönderildi!")
+                    else:
+                        top = max(degisimler.get("20dk", [("?",0,0)]), key=lambda x: x[1])
+                        print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Güncellendi - Top: {top[0]} %{top[1]:.2f}")
 
             son_guncelleme = simdi
 
