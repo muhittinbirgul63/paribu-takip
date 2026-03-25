@@ -1,8 +1,8 @@
 """
 Paribu Değişim Takip Botu
-- 20dk, 1sa, 2sa değişimleri
-- Tek mesaj, BTCTürk formatında 3 bölüm
-- Restart olunca devam eder
+- 20dk, 1sa, 2sa değişimleri tek mesajda
+- Mesaj güncellenir, yeni mesaj atılmaz
+- Restart olunca Telegram'dan geçmiş okur
 """
 
 import requests
@@ -19,9 +19,9 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID        = os.getenv("CHAT_ID")
 ADMIN_ID       = str(os.getenv("ADMIN_ID", "1072335473"))
 
-GUNCELLEME_SURESI = 10
-VERI_SURESI       = 5
-KAYIT_SURESI      = 120
+GUNCELLEME_SURESI = 15   # Telegram güncelleme (saniye) - çok sık güncelleme engeli
+VERI_SURESI       = 5    # Fiyat çekme (saniye)
+KAYIT_SURESI      = 120  # Geçmiş kaydetme (saniye)
 
 PERIYOTLAR = {"20dk": 1200, "1sa": 3600, "2sa": 7200}
 
@@ -32,6 +32,7 @@ mesaj_id       = None
 kayit_mesaj_id = None
 son_guncelleme = 0
 son_kayit      = 0
+son_mesaj_icerik = ""  # Aynı içeriği tekrar gönderme
 
 
 def paribu_fiyatlar():
@@ -89,9 +90,8 @@ def degisim_hesapla(guncel, simdi, periyot):
 
 
 def mesaj_olustur(guncel, simdi):
-    zaman = datetime.now(TZ_TR).strftime("%H:%M:%S")
+    zaman    = datetime.now(TZ_TR).strftime("%H:%M:%S")
     bolumler = []
-
     etiketler = {"20dk": "20 Dakika", "1sa": "1 Saat", "2sa": "2 Saat"}
     emojiler  = {"20dk": "🏃", "1sa": "⏰", "2sa": "🕰"}
 
@@ -112,13 +112,12 @@ def mesaj_olustur(guncel, simdi):
             satirlar.append(f"🟢 <b>{coin}/TL</b>")
             satirlar.append(f"   <code>{isaret}{deg:.2f}%</code>  ›  <b>{fiyat_formatla(bid)}</b>")
             satirlar.append("")
-
         bolumler.append("\n".join(satirlar))
 
     if not bolumler:
         return None
 
-    return f"\n{'─'*20}\n".join(bolumler) + f"\n<i>🔄 {zaman}</i>"
+    return "\n─────────────────────\n".join(bolumler) + f"\n<i>🔄 {zaman}</i>"
 
 
 def telegram_gonder(mesaj):
@@ -128,11 +127,12 @@ def telegram_gonder(mesaj):
             json={"chat_id": CHAT_ID, "text": mesaj, "parse_mode": "HTML"},
             timeout=10
         )
-        if r.json().get("ok"):
-            return r.json()["result"]["message_id"]
-        print(f"Gönder hata: {r.json().get('description')}")
+        veri = r.json()
+        if veri.get("ok"):
+            return veri["result"]["message_id"]
+        print(f"[GONDER HATA] {veri.get('description')}")
     except Exception as e:
-        print(f"Gönder hata: {e}")
+        print(f"[GONDER HATA] {e}")
     return None
 
 
@@ -143,21 +143,29 @@ def telegram_duzenle(msg_id, mesaj):
             json={"chat_id": CHAT_ID, "message_id": msg_id, "text": mesaj, "parse_mode": "HTML"},
             timeout=10
         )
-        return r.json().get("ok", False)
+        veri = r.json()
+        if veri.get("ok"):
+            return True
+        # "message is not modified" hatası — içerik aynı, sorun değil
+        if "not modified" in veri.get("description", ""):
+            return True
+        print(f"[DUZENLE HATA] {veri.get('description')}")
+        return False
     except Exception as e:
-        print(f"Düzenle hata: {e}")
+        print(f"[DUZENLE HATA] {e}")
         return False
 
 
 def kaydet():
     global kayit_mesaj_id
     try:
-        veri = {
-            "snap_zamani": snap_zamani,
-            "mesaj_id": mesaj_id,
-            "snap": {p: {c: list(v) for c, v in list(s.items())[:100]} for p, s in snap.items()},
-        }
+        snap_ozet = {}
+        for p, s in snap.items():
+            snap_ozet[p] = {c: list(v) for c, v in list(s.items())[:100]}
+
+        veri  = {"snap_zamani": snap_zamani, "mesaj_id": mesaj_id, "snap": snap_ozet}
         metin = f"PARIBU_SNAP:{json.dumps(veri)}"
+
         if kayit_mesaj_id is None:
             r = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -166,14 +174,15 @@ def kaydet():
             )
             if r.json().get("ok"):
                 kayit_mesaj_id = r.json()["result"]["message_id"]
-                print(f"[KAYIT] Kaydedildi")
+                print(f"[KAYIT] İlk kayıt yapıldı")
         else:
-            requests.post(
+            r = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
                 json={"chat_id": ADMIN_ID, "message_id": kayit_mesaj_id, "text": metin},
                 timeout=10
             )
-            print(f"[KAYIT] Güncellendi")
+            if r.json().get("ok"):
+                print(f"[KAYIT] Güncellendi")
     except Exception as e:
         print(f"[KAYIT HATA] {e}")
 
@@ -192,6 +201,7 @@ def yukle():
                 if metin.startswith("PARIBU_SNAP:"):
                     try:
                         veri = json.loads(metin[12:])
+                        simdi = time.time()
                         for p in PERIYOTLAR:
                             if p in veri.get("snap_zamani", {}):
                                 snap_zamani[p] = veri["snap_zamani"][p]
@@ -202,14 +212,14 @@ def yukle():
                         print(f"[YUKLE] Yüklendi, mesaj_id={mesaj_id}")
                         return
                     except Exception as e:
-                        print(f"[YUKLE HATA] {e}")
-        print("[YUKLE] Geçmiş yok, sıfırdan başlıyor")
+                        print(f"[YUKLE PARSE HATA] {e}")
+        print("[YUKLE] Geçmiş bulunamadı, sıfırdan başlıyor")
     except Exception as e:
         print(f"[YUKLE HATA] {e}")
 
 
 def bot_calistir():
-    global mesaj_id, son_guncelleme, son_kayit
+    global mesaj_id, son_guncelleme, son_kayit, son_mesaj_icerik
 
     print("Paribu Takip Botu başlatılıyor...")
     yukle()
@@ -224,26 +234,34 @@ def bot_calistir():
 
         snap_guncelle(guncel, simdi)
 
+        # Geçmişi kaydet
         if simdi - son_kayit >= KAYIT_SURESI:
             if any(len(s) > 0 for s in snap.values()):
                 kaydet()
             son_kayit = simdi
 
+        # Telegram güncelle
         if simdi - son_guncelleme >= GUNCELLEME_SURESI:
             mesaj = mesaj_olustur(guncel, simdi)
 
             if mesaj is None:
                 print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Veri toplanıyor...")
             elif mesaj_id is None:
+                # İlk mesaj
                 mesaj_id = telegram_gonder(mesaj)
-                print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] İlk mesaj gönderildi!")
+                if mesaj_id:
+                    son_mesaj_icerik = mesaj
+                    print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] İlk mesaj gönderildi!")
             else:
+                # Güncelle — yeni mesaj ATMA
                 basari = telegram_duzenle(mesaj_id, mesaj)
-                if not basari:
-                    mesaj_id = telegram_gonder(mesaj)
-                    print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Yeni mesaj gönderildi!")
-                else:
+                if basari:
+                    son_mesaj_icerik = mesaj
                     print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Güncellendi")
+                else:
+                    # Sadece mesaj silinmişse yeni gönder
+                    print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Düzenleme başarısız, mesaj silinmiş olabilir")
+                    mesaj_id = telegram_gonder(mesaj)
 
             son_guncelleme = simdi
 
