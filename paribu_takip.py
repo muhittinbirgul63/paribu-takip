@@ -107,11 +107,9 @@ def mesaj_olustur(guncel, simdi):
             f"🕐 <i>Son {sure_str} ({etiketler[periyot]})</i>",
             "",
         ]
-        for coin, deg, bid in degisimler[:10]:
+        for coin, deg, bid in degisimler[:5]:
             isaret = "+" if deg >= 0 else ""
-            satirlar.append(f"🟢 <b>{coin}/TL</b>")
-            satirlar.append(f"   <code>{isaret}{deg:.2f}%</code>  ›  <b>{fiyat_formatla(bid)}</b>")
-            satirlar.append("")
+            satirlar.append(f"🟢 <b>{coin}/TL</b>  <code>{isaret}{deg:.2f}%</code>  <i>{fiyat_formatla(bid)}</i>")
         bolumler.append("\n".join(satirlar))
 
     if not bolumler:
@@ -259,9 +257,8 @@ def bot_calistir():
                     son_mesaj_icerik = mesaj
                     print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Güncellendi")
                 else:
-                    # Mesaj bulunamadı, sıfırla ve bir kez yeni gönder
-                    print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Mesaj bulunamadı, sıfırlanıyor")
-                    mesaj_id = None
+                    # Düzenleme başarısız — tekrar deneme, yeni mesaj gönderme
+                    print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Düzenleme başarısız, bekleniyor")
 
             son_guncelleme = simdi
 
