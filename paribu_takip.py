@@ -259,9 +259,9 @@ def bot_calistir():
                     son_mesaj_icerik = mesaj
                     print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Güncellendi")
                 else:
-                    # Sadece mesaj silinmişse yeni gönder
-                    print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Düzenleme başarısız, mesaj silinmiş olabilir")
-                    mesaj_id = telegram_gonder(mesaj)
+                    # Mesaj bulunamadı, sıfırla ve bir kez yeni gönder
+                    print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Mesaj bulunamadı, sıfırlanıyor")
+                    mesaj_id = None
 
             son_guncelleme = simdi
 
