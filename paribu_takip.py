@@ -107,7 +107,7 @@ def mesaj_olustur(guncel, simdi):
             f"🕐 <i>Son {sure_str} ({etiketler[periyot]})</i>",
             "",
         ]
-        for coin, deg, bid in degisimler[:5]:
+        for coin, deg, bid in degisimler[:7]:
             isaret = "+" if deg >= 0 else ""
             satirlar.append(f"🟢 <b>{coin}/TL</b>  <code>{isaret}{deg:.2f}%</code>  <i>{fiyat_formatla(bid)}</i>")
         bolumler.append("\n".join(satirlar))
@@ -257,8 +257,8 @@ def bot_calistir():
                     son_mesaj_icerik = mesaj
                     print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Güncellendi")
                 else:
-                    # Düzenleme başarısız — tekrar deneme, yeni mesaj gönderme
-                    print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Düzenleme başarısız, bekleniyor")
+                    print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Mesaj bulunamadı, yeni mesaj gönderiliyor")
+                    mesaj_id = telegram_gonder(mesaj)
 
             son_guncelleme = simdi
 
