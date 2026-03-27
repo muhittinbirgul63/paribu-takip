@@ -19,7 +19,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID        = os.getenv("CHAT_ID")
 ADMIN_ID       = str(os.getenv("ADMIN_ID", "1072335473"))
 
-GUNCELLEME_SURESI = 15   # Telegram güncelleme (saniye) - çok sık güncelleme engeli
+GUNCELLEME_SURESI = 30   # 15'ten 30'a çıkardık (Telegram limit koruması)
 VERI_SURESI       = 5    # Fiyat çekme (saniye)
 KAYIT_SURESI      = 120  # Geçmiş kaydetme (saniye)
 
@@ -28,11 +28,11 @@ PERIYOTLAR = {"20dk": 1200, "1sa": 3600, "2sa": 7200}
 snap        = {p: {} for p in PERIYOTLAR}
 snap_zamani = {p: 0  for p in PERIYOTLAR}
 
-mesaj_id       = None
-kayit_mesaj_id = None
-son_guncelleme = 0
-son_kayit      = 0
-son_mesaj_icerik = ""  # Aynı içeriği tekrar gönderme
+mesaj_id         = None
+kayit_mesaj_id   = None
+son_guncelleme   = 0
+son_kayit        = 0
+son_mesaj_icerik = ""
 
 
 def paribu_fiyatlar():
@@ -70,7 +70,8 @@ def sure_formatla(saniye):
 def snap_guncelle(guncel, simdi):
     for periyot, sure in PERIYOTLAR.items():
         if snap_zamani[periyot] == 0 or simdi - snap_zamani[periyot] >= sure:
-            snap[periyot] = {coin: (simdi, bid) for coin, bid in guncel.items()}
+            # Sadece ilk 200 coin kaydet — bellek şişmesin
+            snap[periyot] = {coin: (simdi, bid) for coin, bid in list(guncel.items())[:200]}
             snap_zamani[periyot] = simdi
             print(f"[SNAP] {periyot} snap alındı")
 
@@ -90,8 +91,8 @@ def degisim_hesapla(guncel, simdi, periyot):
 
 
 def mesaj_olustur(guncel, simdi):
-    zaman    = datetime.now(TZ_TR).strftime("%H:%M:%S")
-    bolumler = []
+    zaman     = datetime.now(TZ_TR).strftime("%H:%M:%S")
+    bolumler  = []
     etiketler = {"20dk": "20 Dakika", "1sa": "1 Saat", "2sa": "2 Saat"}
     emojiler  = {"20dk": "🏃", "1sa": "⏰", "2sa": "🕰"}
 
@@ -144,7 +145,6 @@ def telegram_duzenle(msg_id, mesaj):
         veri = r.json()
         if veri.get("ok"):
             return True
-        # "message is not modified" hatası — içerik aynı, sorun değil
         if "not modified" in veri.get("description", ""):
             return True
         print(f"[DUZENLE HATA] {veri.get('description')}")
@@ -199,7 +199,6 @@ def yukle():
                 if metin.startswith("PARIBU_SNAP:"):
                     try:
                         veri = json.loads(metin[12:])
-                        simdi = time.time()
                         for p in PERIYOTLAR:
                             if p in veri.get("snap_zamani", {}):
                                 snap_zamani[p] = veri["snap_zamani"][p]
@@ -223,44 +222,53 @@ def bot_calistir():
     yukle()
 
     while True:
-        simdi = time.time()
+        try:  # ← ANA DÖNGÜ KORUMASI: beklenmedik hata olursa bot çökmez
+            simdi = time.time()
 
-        guncel = paribu_fiyatlar()
-        if not guncel:
-            time.sleep(VERI_SURESI)
-            continue
+            guncel = paribu_fiyatlar()
+            if not guncel:
+                time.sleep(VERI_SURESI)
+                continue
 
-        snap_guncelle(guncel, simdi)
+            snap_guncelle(guncel, simdi)
 
-        # Geçmişi kaydet
-        if simdi - son_kayit >= KAYIT_SURESI:
-            if any(len(s) > 0 for s in snap.values()):
-                kaydet()
-            son_kayit = simdi
+            # Geçmişi kaydet
+            if simdi - son_kayit >= KAYIT_SURESI:
+                if any(len(s) > 0 for s in snap.values()):
+                    kaydet()
+                son_kayit = simdi
 
-        # Telegram güncelle
-        if simdi - son_guncelleme >= GUNCELLEME_SURESI:
-            mesaj = mesaj_olustur(guncel, simdi)
+            # Telegram güncelle
+            if simdi - son_guncelleme >= GUNCELLEME_SURESI:
+                mesaj = mesaj_olustur(guncel, simdi)
 
-            if mesaj is None:
-                print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Veri toplanıyor...")
-            elif mesaj_id is None:
-                # İlk mesaj
-                mesaj_id = telegram_gonder(mesaj)
-                if mesaj_id:
-                    son_mesaj_icerik = mesaj
-                    print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] İlk mesaj gönderildi!")
-            else:
-                # Güncelle — yeni mesaj ATMA
-                basari = telegram_duzenle(mesaj_id, mesaj)
-                if basari:
-                    son_mesaj_icerik = mesaj
-                    print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Güncellendi")
-                else:
-                    print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Mesaj bulunamadı, yeni mesaj gönderiliyor")
+                if mesaj is None:
+                    print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Veri toplanıyor...")
+                elif mesaj_id is None:
+                    # İlk mesaj
                     mesaj_id = telegram_gonder(mesaj)
+                    if mesaj_id:
+                        kaydet()  # ← mesaj_id hemen kaydedilsin
+                        son_mesaj_icerik = mesaj
+                        print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] İlk mesaj gönderildi!")
+                else:
+                    # Güncelle — yeni mesaj ATMA
+                    basari = telegram_duzenle(mesaj_id, mesaj)
+                    if basari:
+                        son_mesaj_icerik = mesaj
+                        print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Güncellendi")
+                    else:
+                        print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Mesaj bulunamadı, yeni mesaj gönderiliyor")
+                        mesaj_id = telegram_gonder(mesaj)
+                        if mesaj_id:
+                            kaydet()  # ← yeni mesaj_id hemen kaydedilsin
 
-            son_guncelleme = simdi
+                son_guncelleme = simdi
+
+        except Exception as e:
+            # Bot çökmez, hatayı yazar ve devam eder
+            print(f"[ANA DÖNGÜ HATA] {e}")
+            time.sleep(10)  # Hata sonrası 10 saniye bekle
 
         time.sleep(VERI_SURESI)
 
