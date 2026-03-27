@@ -19,7 +19,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID        = os.getenv("CHAT_ID")
 ADMIN_ID       = str(os.getenv("ADMIN_ID", "1072335473"))
 
-GUNCELLEME_SURESI = 30   # 15'ten 30'a çıkardık (Telegram limit koruması)
+GUNCELLEME_SURESI = 4    # Telegram güncelleme süresi (saniye)
 VERI_SURESI       = 5    # Fiyat çekme (saniye)
 KAYIT_SURESI      = 120  # Geçmiş kaydetme (saniye)
 
