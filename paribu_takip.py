@@ -1,6 +1,6 @@
 """
 Paribu Değişim Takip Botu
-- 20dk, 1sa, 2sa değişimleri tek mesajda
+- Kayan pencere sistemi: her zaman tam 20dk, 1sa, 2sa öncesiyle karşılaştırır
 - Mesaj güncellenir, yeni mesaj atılmaz
 - Restart olunca Telegram'dan geçmiş okur
 """
@@ -10,6 +10,7 @@ import time
 import os
 import json
 from datetime import datetime, timezone, timedelta
+from collections import deque
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,20 +20,21 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID        = os.getenv("CHAT_ID")
 ADMIN_ID       = str(os.getenv("ADMIN_ID", "1072335473"))
 
-GUNCELLEME_SURESI = 4    # Telegram güncelleme süresi (saniye)
+GUNCELLEME_SURESI = 4    # Telegram güncelleme (saniye)
 VERI_SURESI       = 5    # Fiyat çekme (saniye)
 KAYIT_SURESI      = 120  # Geçmiş kaydetme (saniye)
 
 PERIYOTLAR = {"20dk": 1200, "1sa": 3600, "2sa": 7200}
 
-snap        = {p: {} for p in PERIYOTLAR}
-snap_zamani = {p: 0  for p in PERIYOTLAR}
+# Her coin için zaman damgalı fiyat geçmişi
+# { "BTC": deque([(zaman, fiyat), ...]) }
+fiyat_gecmisi = {}
+MAX_GECMIS    = 3000  # 2sa / 5sn = 1440, biraz fazla tutalım
 
-mesaj_id         = None
-kayit_mesaj_id   = None
-son_guncelleme   = 0
-son_kayit        = 0
-son_mesaj_icerik = ""
+mesaj_id       = None
+kayit_mesaj_id = None
+son_guncelleme = 0
+son_kayit      = 0
 
 
 def paribu_fiyatlar():
@@ -58,34 +60,55 @@ def fiyat_formatla(fiyat):
     else:               return f"{fiyat:.6f}₺"
 
 
-def sure_formatla(saniye):
-    sa = int(saniye // 3600)
-    dk = int((saniye % 3600) // 60)
-    sn = int(saniye % 60)
-    if sa > 0:   return f"{sa}sa {dk}dk"
-    elif dk > 0: return f"{dk}dk {sn}sn"
-    else:        return f"{sn}sn"
+def gecmis_guncelle(guncel, simdi):
+    """Her coin için geçmişe yeni fiyat ekle, çok eskiyi sil."""
+    en_eski_tut = simdi - max(PERIYOTLAR.values()) - 60  # 2sa + 1dk tolerans
+
+    for coin, fiyat in guncel.items():
+        if coin not in fiyat_gecmisi:
+            fiyat_gecmisi[coin] = deque(maxlen=MAX_GECMIS)
+        fiyat_gecmisi[coin].append((simdi, fiyat))
+
+        # 2 saatten eski kayıtları temizle
+        while fiyat_gecmisi[coin] and fiyat_gecmisi[coin][0][0] < en_eski_tut:
+            fiyat_gecmisi[coin].popleft()
 
 
-def snap_guncelle(guncel, simdi):
-    for periyot, sure in PERIYOTLAR.items():
-        if snap_zamani[periyot] == 0 or simdi - snap_zamani[periyot] >= sure:
-            # Sadece ilk 200 coin kaydet — bellek şişmesin
-            snap[periyot] = {coin: (simdi, bid) for coin, bid in list(guncel.items())[:200]}
-            snap_zamani[periyot] = simdi
-            print(f"[SNAP] {periyot} snap alındı")
+def gecmisteki_fiyat(coin, simdi, periyot_sn):
+    """
+    Tam periyot_sn önce o coinin fiyatını bul.
+    Hedef zamana en yakın kaydı döndür.
+    """
+    if coin not in fiyat_gecmisi or not fiyat_gecmisi[coin]:
+        return None
+
+    hedef_zaman = simdi - periyot_sn
+    en_yakin_fiyat = None
+    en_fark        = float("inf")
+
+    for zaman, fiyat in fiyat_gecmisi[coin]:
+        fark = abs(zaman - hedef_zaman)
+        if fark < en_fark:
+            en_fark        = fark
+            en_yakin_fiyat = fiyat
+
+    # Hedef zamana 60 saniyeden fazla uzaksa güvenilir değil
+    if en_fark > 60:
+        return None
+
+    return en_yakin_fiyat
 
 
-def degisim_hesapla(guncel, simdi, periyot):
+def degisim_hesapla(guncel, simdi, periyot_sn):
+    """Tüm coinler için kayan pencere değişimini hesapla."""
     degisimler = []
-    for coin, guncel_bid in guncel.items():
-        if coin not in snap[periyot]:
+    for coin, guncel_fiyat in guncel.items():
+        eski_fiyat = gecmisteki_fiyat(coin, simdi, periyot_sn)
+        if eski_fiyat is None or eski_fiyat <= 0:
             continue
-        snap_zaman, snap_bid = snap[periyot][coin]
-        if simdi - snap_zaman < 10 or snap_bid <= 0:
-            continue
-        degisim = ((guncel_bid - snap_bid) / snap_bid) * 100
-        degisimler.append((coin, degisim, guncel_bid))
+        degisim = ((guncel_fiyat - eski_fiyat) / eski_fiyat) * 100
+        degisimler.append((coin, degisim, guncel_fiyat))
+
     degisimler.sort(key=lambda x: x[1], reverse=True)
     return degisimler
 
@@ -96,21 +119,21 @@ def mesaj_olustur(guncel, simdi):
     etiketler = {"20dk": "20 Dakika", "1sa": "1 Saat", "2sa": "2 Saat"}
     emojiler  = {"20dk": "🏃", "1sa": "⏰", "2sa": "🕰"}
 
-    for periyot in PERIYOTLAR:
-        degisimler = degisim_hesapla(guncel, simdi, periyot)
+    for periyot, periyot_sn in PERIYOTLAR.items():
+        degisimler = degisim_hesapla(guncel, simdi, periyot_sn)
         if not degisimler:
             continue
-        gecen    = simdi - snap_zamani[periyot] if snap_zamani[periyot] > 0 else 0
-        sure_str = sure_formatla(gecen)
 
         satirlar = [
             f"{emojiler[periyot]} <b>Paribu Yükselenler</b>",
-            f"🕐 <i>Son {sure_str} ({etiketler[periyot]})</i>",
+            f"🕐 <i>Son {etiketler[periyot]}</i>",
             "",
         ]
-        for coin, deg, bid in degisimler[:7]:
+        for coin, deg, fiyat in degisimler[:7]:
             isaret = "+" if deg >= 0 else ""
-            satirlar.append(f"🟢 <b>{coin}/TL</b>  <code>{isaret}{deg:.2f}%</code>  <i>{fiyat_formatla(bid)}</i>")
+            satirlar.append(
+                f"🟢 <b>{coin}/TL</b>  <code>{isaret}{deg:.2f}%</code>  <i>{fiyat_formatla(fiyat)}</i>"
+            )
         bolumler.append("\n".join(satirlar))
 
     if not bolumler:
@@ -155,14 +178,23 @@ def telegram_duzenle(msg_id, mesaj):
 
 
 def kaydet():
+    """Fiyat geçmişini ve mesaj_id'yi Telegram'a kaydet."""
     global kayit_mesaj_id
     try:
-        snap_ozet = {}
-        for p, s in snap.items():
-            snap_ozet[p] = {c: list(v) for c, v in list(s.items())[:100]}
+        gecmis_ozet = {}
+        for coin, dq in list(fiyat_gecmisi.items())[:150]:
+            gecmis_ozet[coin] = list(dq)[-100:]
 
-        veri  = {"snap_zamani": snap_zamani, "mesaj_id": mesaj_id, "snap": snap_ozet}
+        veri  = {"mesaj_id": mesaj_id, "gecmis": gecmis_ozet}
         metin = f"PARIBU_SNAP:{json.dumps(veri)}"
+
+        # Telegram 4096 karakter limiti — aşarsa kısalt
+        if len(metin) > 4000:
+            gecmis_ozet2 = {}
+            for coin, dq in list(fiyat_gecmisi.items())[:80]:
+                gecmis_ozet2[coin] = list(dq)[-50:]
+            veri  = {"mesaj_id": mesaj_id, "gecmis": gecmis_ozet2}
+            metin = f"PARIBU_SNAP:{json.dumps(veri)}"
 
         if kayit_mesaj_id is None:
             r = requests.post(
@@ -172,7 +204,7 @@ def kaydet():
             )
             if r.json().get("ok"):
                 kayit_mesaj_id = r.json()["result"]["message_id"]
-                print(f"[KAYIT] İlk kayıt yapıldı")
+                print("[KAYIT] İlk kayıt yapıldı")
         else:
             r = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
@@ -180,12 +212,13 @@ def kaydet():
                 timeout=10
             )
             if r.json().get("ok"):
-                print(f"[KAYIT] Güncellendi")
+                print("[KAYIT] Güncellendi")
     except Exception as e:
         print(f"[KAYIT HATA] {e}")
 
 
 def yukle():
+    """Telegram'dan kaydedilmiş geçmişi oku."""
     global kayit_mesaj_id, mesaj_id
     try:
         r = requests.get(
@@ -199,14 +232,15 @@ def yukle():
                 if metin.startswith("PARIBU_SNAP:"):
                     try:
                         veri = json.loads(metin[12:])
-                        for p in PERIYOTLAR:
-                            if p in veri.get("snap_zamani", {}):
-                                snap_zamani[p] = veri["snap_zamani"][p]
-                            if p in veri.get("snap", {}):
-                                snap[p] = {c: tuple(v) for c, v in veri["snap"][p].items()}
                         mesaj_id       = veri.get("mesaj_id")
                         kayit_mesaj_id = m.get("message_id")
-                        print(f"[YUKLE] Yüklendi, mesaj_id={mesaj_id}")
+
+                        for coin, kayitlar in veri.get("gecmis", {}).items():
+                            fiyat_gecmisi[coin] = deque(
+                                [tuple(k) for k in kayitlar], maxlen=MAX_GECMIS
+                            )
+
+                        print(f"[YUKLE] Yüklendi, mesaj_id={mesaj_id}, {len(fiyat_gecmisi)} coin")
                         return
                     except Exception as e:
                         print(f"[YUKLE PARSE HATA] {e}")
@@ -216,13 +250,13 @@ def yukle():
 
 
 def bot_calistir():
-    global mesaj_id, son_guncelleme, son_kayit, son_mesaj_icerik
+    global mesaj_id, son_guncelleme, son_kayit
 
     print("Paribu Takip Botu başlatılıyor...")
     yukle()
 
     while True:
-        try:  # ← ANA DÖNGÜ KORUMASI: beklenmedik hata olursa bot çökmez
+        try:
             simdi = time.time()
 
             guncel = paribu_fiyatlar()
@@ -230,12 +264,12 @@ def bot_calistir():
                 time.sleep(VERI_SURESI)
                 continue
 
-            snap_guncelle(guncel, simdi)
+            # Geçmişe ekle
+            gecmis_guncelle(guncel, simdi)
 
             # Geçmişi kaydet
             if simdi - son_kayit >= KAYIT_SURESI:
-                if any(len(s) > 0 for s in snap.values()):
-                    kaydet()
+                kaydet()
                 son_kayit = simdi
 
             # Telegram güncelle
@@ -245,30 +279,25 @@ def bot_calistir():
                 if mesaj is None:
                     print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Veri toplanıyor...")
                 elif mesaj_id is None:
-                    # İlk mesaj
                     mesaj_id = telegram_gonder(mesaj)
                     if mesaj_id:
-                        kaydet()  # ← mesaj_id hemen kaydedilsin
-                        son_mesaj_icerik = mesaj
+                        kaydet()
                         print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] İlk mesaj gönderildi!")
                 else:
-                    # Güncelle — yeni mesaj ATMA
                     basari = telegram_duzenle(mesaj_id, mesaj)
                     if basari:
-                        son_mesaj_icerik = mesaj
                         print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Güncellendi")
                     else:
-                        print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Mesaj bulunamadı, yeni mesaj gönderiliyor")
+                        print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Yeni mesaj gönderiliyor")
                         mesaj_id = telegram_gonder(mesaj)
                         if mesaj_id:
-                            kaydet()  # ← yeni mesaj_id hemen kaydedilsin
+                            kaydet()
 
                 son_guncelleme = simdi
 
         except Exception as e:
-            # Bot çökmez, hatayı yazar ve devam eder
             print(f"[ANA DÖNGÜ HATA] {e}")
-            time.sleep(10)  # Hata sonrası 10 saniye bekle
+            time.sleep(10)
 
         time.sleep(VERI_SURESI)
 
